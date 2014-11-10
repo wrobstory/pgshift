@@ -6,12 +6,19 @@ pgshift: write a Postgres pg_dump .sql file to Redshift via S3
 """
 from __future__ import division, print_function
 
-import cStringIO
+from cStringIO import StringIO
+import gzip
+import json
 import math
+import os
 import re
+import urlparse
 import uuid
 
+from boto.s3.connection import S3Connection
 import pandas as pd
+import psycopg2
+
 
 def get_rows(path):
     """
@@ -42,7 +49,7 @@ def get_rows(path):
                 read_lines = True
                 col_keys = [c.strip() for c in match.groups()[0].split(',')]
 
-    tbl = pd.read_table(cStringIO.StringIO(str_blob), delimiter='\t',
+    tbl = pd.read_table(StringIO(str_blob), delimiter='\t',
                         names=col_keys)
 
     return tbl
@@ -79,9 +86,10 @@ class PGShift(object):
 
     def __init__(self, table):
         self.table = table
+        self.manifest_url = None
 
     def put_to_s3(self, bucket_name, keypath, chunks=1, aws_access_key_id=None,
-                  aws_secret_access_key=None):
+                  aws_secret_access_key=None, mandatory_manifest=True):
         """
         Will put the result table to S3 as a gzipped CSV with an accompanying
         .manifest file. The aws keys are not required if you have environmental
@@ -110,15 +118,107 @@ class PGShift(object):
             chunks=4, 8, etc
         aws_access_key_id: str, default None
         aws_secret_access_key: str, default None
+        mandatory_manifest: bool, default True
+            Should .manifest entries be mandatory?
         """
         if aws_access_key_id and aws_secret_access_key:
             self.conn = S3Connection(aws_access_key_id, aws_secret_access_key)
         else:
             self.conn = S3Connection()
 
-        bucket = self.conn.get_bucket(bucket_name)
+        self.bucket = self.conn.get_bucket(bucket_name)
 
-        manifested = []
+        self.manifest_file = {'entries': []}
+        self.generated_keys = []
         table_chunks = chunk_dataframe(self.table, chunks)
-        for chunk in table_chunks:
-            zipname = '_'.join(['pgdump', str(uuid.uuid4()), str(chunk)])
+        batch_uuid = str(uuid.uuid4())
+        for idx, chunk in enumerate(table_chunks):
+            zipname = '_'.join(['pgdump', batch_uuid, str(idx)]) + '.gz'
+            fp, gzfp = StringIO(), StringIO()
+            csvd = chunk.to_csv(fp, index=False, header=False)
+            fp.seek(0)
+            url = urlparse.urljoin(keypath, zipname)
+            key = self.bucket.new_key(url)
+            self.generated_keys.append(url)
+            gzipped = gzip.GzipFile(fileobj=gzfp, mode='w')
+            gzipped.write(fp.read())
+            gzipped.close()
+            gzfp.seek(0)
+            print('Uploading {}...'.format(self.bucket.name + url))
+            key.set_contents_from_file(gzfp)
+
+            self.manifest_file['entries'].append({
+                'url': ''.join(['s3://', self.bucket.name, url]),
+                'mandatory': mandatory_manifest}
+                )
+
+        manifest_name = 'pgshift_{}.manifest'.format(batch_uuid)
+        fest_url = urlparse.urljoin(keypath, manifest_name)
+        self.generated_keys.append(fest_url)
+        self.manifest_url = ''.join(['s3://', self.bucket.name, fest_url])
+        fest_key = self.bucket.new_key(fest_url)
+        fest_fp = StringIO(json.dumps(self.manifest_file, sort_keys=True,
+                                      indent=4))
+        fest_fp.seek(0)
+        print('Uploading manifest file {}...'.format(
+            self.bucket.name + fest_url))
+        fest_key.set_contents_from_file(fest_fp)
+
+    def clean_up_s3(self):
+        """Clean up S3 keys generated in `put_to_s3`"""
+        for key in self.generated_keys:
+            print('Deleting {}...'.format(self.bucket.name + key))
+            self.bucket.delete_key(key)
+
+    def copy_to_redshift(self, table_name, aws_access_key_id=None,
+                         aws_secret_access_key=None, database=None, user=None,
+                         password=None, host=None, port=None, sslmode=None):
+        """
+        COPY data from S3 to Redshift using the data and manifest generated
+        with `put_to_s3`, which must be called first in order to
+        perform the COPY statement.
+
+        Parameters
+        ----------
+        table_name: str
+            Table name to copy data to
+        aws_access_key_id: str
+        aws_secret_access_key: str
+        database: str, if None os.environ.get('PGDATABASE')
+        user: str, if None os.environ.get('PGUSER')
+        password: str, if None os.environ.get('PGPASSWORD')
+        host: str, if None os.environ.get('PGHOST')
+        port: int, if None os.environ.get('PGPORT') or 5439
+        sslmode: str
+            sslmode param (ex: 'require', 'prefer', etc)
+        """
+        aws_secret_access_key = (aws_secret_access_key
+                                 or os.environ.get('AWS_SECRET_ACCESS_KEY'))
+        aws_access_key_id = (aws_access_key_id
+                             or os.environ.get('AWS_ACCESS_KEY_ID'))
+
+        database = database or os.environ.get('PGDATABASE')
+        user = user or os.environ.get('PGUSER')
+        password = password or os.environ.get('PGPASSWORD')
+        host = host or os.environ.get('PGHOST')
+        port = port or os.environ.get('PGPORT') or 5439
+
+        print('Connecting to Redshift...')
+        self.conn = psycopg2.connect(database=database, user=user,
+                                     password=password, host=host,
+                                     port=port, sslmode='require')
+
+        self.cur = self.conn.cursor()
+
+        query = """COPY {0}
+                   FROM '{1}'
+                   CREDENTIALS 'aws_access_key_id={2};aws_secret_access_key={3}'
+                   MANIFEST
+                   GZIP
+                   CSV;""".format(table_name, self.manifest_url,
+                                  aws_access_key_id, aws_secret_access_key)
+        print("COPYing data from {} into table {}...".format(self.manifest_url,
+                                                             table_name))
+        self.cur.execute(query)
+        self.conn.commit()
+        self.conn.close()
