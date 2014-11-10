@@ -6,13 +6,21 @@ pgshift: write a Postgres pg_dump .sql file to Redshift via S3
 """
 from __future__ import division, print_function
 
-from cStringIO import StringIO
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from io import StringIO
+
 import gzip
 import json
 import math
 import os
 import re
-import urlparse
+
+try:
+    from urlparse import urljoin
+except ImportError:
+    from urllib.parse import urljoin
 import uuid
 
 from boto.s3.connection import S3Connection
@@ -70,7 +78,7 @@ def process(filepath):
 def chunk_dataframe(df, num_chunks):
     """Chunk DataFrame into `chunks` DataFrames in a list"""
     chunk_size = int(math.floor(len(df) / num_chunks)) or 1
-    chunker = range(chunk_size, len(df), chunk_size) or [chunk_size]
+    chunker = list(range(chunk_size, len(df), chunk_size)) or [chunk_size]
     if len(df) == num_chunks:
         chunker.append(len(df))
     last_iter = 0
@@ -137,7 +145,7 @@ class PGShift(object):
             fp, gzfp = StringIO(), StringIO()
             csvd = chunk.to_csv(fp, index=False, header=False)
             fp.seek(0)
-            url = urlparse.urljoin(keypath, zipname)
+            url = urljoin(keypath, zipname)
             key = self.bucket.new_key(url)
             self.generated_keys.append(url)
             gzipped = gzip.GzipFile(fileobj=gzfp, mode='w')
@@ -153,7 +161,7 @@ class PGShift(object):
                 )
 
         manifest_name = 'pgshift_{}.manifest'.format(batch_uuid)
-        fest_url = urlparse.urljoin(keypath, manifest_name)
+        fest_url = urljoin(keypath, manifest_name)
         self.generated_keys.append(fest_url)
         self.manifest_url = ''.join(['s3://', self.bucket.name, fest_url])
         fest_key = self.bucket.new_key(fest_url)

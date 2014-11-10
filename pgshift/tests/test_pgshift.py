@@ -54,7 +54,4 @@ class TestPGShift(unittest.TestCase):
         expected_1 = df_2[2:4]
         expected_2 = df_2[4:]
         for i, expect in enumerate([expected_0, expected_1, expected_2]):
-            from pprint import pprint;import pytest;pytest.set_trace()
             pdt.assert_frame_equal(chunked[i], expect)
-
-

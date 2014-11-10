@@ -19,5 +19,13 @@ setup(
                  'Programming Language :: Python :: 2',
                  'Programming Language :: Python :: 3',
                  'License :: OSI Approved :: MIT License'],
-    packages=['pgshift']
-)
+    packages=['pgshift'],
+    install_requires=['Cython==0.21.1',
+                      'boto==2.34.0',
+                      'gnureadline==6.3.3',
+                      'numpy==1.9.1',
+                      'pandas==0.15.0',
+                      'psycopg2==2.5.4',
+                      'python-dateutil==2.2',
+                      'pytz==2014.9']
+                      )
