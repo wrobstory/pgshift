@@ -136,7 +136,7 @@ class PGShift(object):
 
         self.bucket = self.conn.get_bucket(bucket_name)
 
-        self.manifest_file = {'entries': []}
+        self.manifest = {'entries': []}
         self.generated_keys = []
         table_chunks = chunk_dataframe(self.table, chunks)
         batch_uuid = str(uuid.uuid4())
@@ -155,7 +155,7 @@ class PGShift(object):
             print('Uploading {}...'.format(self.bucket.name + url))
             key.set_contents_from_file(gzfp)
 
-            self.manifest_file['entries'].append({
+            self.manifest['entries'].append({
                 'url': ''.join(['s3://', self.bucket.name, url]),
                 'mandatory': mandatory_manifest}
                 )
@@ -165,7 +165,7 @@ class PGShift(object):
         self.generated_keys.append(fest_url)
         self.manifest_url = ''.join(['s3://', self.bucket.name, fest_url])
         fest_key = self.bucket.new_key(fest_url)
-        fest_fp = StringIO(json.dumps(self.manifest_file, sort_keys=True,
+        fest_fp = StringIO(json.dumps(self.manifest, sort_keys=True,
                                       indent=4))
         fest_fp.seek(0)
         print('Uploading manifest file {}...'.format(
